@@ -1359,7 +1359,7 @@
       ${state.queue.length ? `<div class="section-title"><h2>Antrean offline</h2></div>
       <div class="set-group"><button class="set-item" id="sFlush"><div class="ic">⏳</div><div class="tx-main"><strong>${state.queue.length} transaksi belum terkirim</strong><span>Ketuk untuk kirim sekarang</span></div><span class="chev">›</span></button></div>` : ''}
 
-      <p class="foot-note">Catatku v1.1 · Data tersimpan di Google Sheets milikmu</p>
+      <p class="foot-note">Catatku v1.1.1 · Data tersimpan di Google Sheets milikmu</p>
     `;
     $('#sPing', v).addEventListener('click', async (e) => {
       const b = e.currentTarget; b.disabled = true; b.textContent = 'Mengecek…';
@@ -1539,7 +1539,18 @@
   });
 
   if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => { }));
+    window.addEventListener('load', () => {
+      const hadController = !!navigator.serviceWorker.controller;
+      navigator.serviceWorker.register('./sw.js', { updateViaCache: 'none' })
+        .then((reg) => { reg.update().catch(() => { }); })
+        .catch(() => { });
+      // versi baru aktif → muat ulang sekali agar langsung terpakai
+      let reloaded = false;
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        if (!hadController || reloaded || sheetStack.length) return;
+        reloaded = true; location.reload();
+      });
+    });
   }
 
   (async function start() {
