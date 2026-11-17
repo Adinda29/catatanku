@@ -2,7 +2,7 @@
    Strategi: NETWORK-FIRST untuk file aplikasi → saat online selalu memakai versi
    terbaru dari GitHub; saat offline memakai salinan tersimpan.
    Naikkan VERSION setiap kali mengubah file aplikasi. */
-const VERSION = 'catatku-v1.1.1';
+const VERSION = 'catatku-v1.2.0';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './manifest.webmanifest',
   './icon-192.png', './icon-512.png', './apple-touch-icon.png'];
 

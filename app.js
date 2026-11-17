@@ -16,7 +16,7 @@
     pengeluaran: ['Makan & Minum', 'Transportasi', 'Belanja', 'Tagihan', 'Pulsa & Internet', 'Kesehatan', 'Hiburan', 'Pendidikan', 'Rumah Tangga', 'Lainnya'],
     pemasukan: ['Gaji', 'Bonus', 'Freelance', 'Hadiah', 'Investasi', 'Lainnya']
   };
-  const PALETTE = ['#4f46e5', '#0fb5a6', '#a855f7', '#f59e0b', '#ec4899', '#0ea5e9', '#22c55e', '#ef6c57', '#94a3b8'];
+  const PALETTE = ['#8b1e3f', '#c97b63', '#0f9f8f', '#c9a24a', '#6d4c8d', '#e07a8f', '#5b7c99', '#9a8f5c', '#94a3b8'];
   const ICONS = [
     [/makan|minum|food|kuliner|jajan|kopi|resto/i, '🍜'], [/transport|bensin|bbm|ojek|grab|gojek|parkir|tol|kendaraan|motor|mobil/i, '🛵'],
     [/belanja|shopping|baju|pakaian/i, '🛍️'], [/tagihan|listrik|air|pln|pdam|cicilan|kredit|sewa|kos/i, '🧾'],
@@ -1296,15 +1296,15 @@
       <section class="card chart-card" style="margin-top:14px">
         <div class="chart-head"><div><h3>Tren</h3><p class="sub">${mode === 'harian' && spanDays <= 92 ? (p.type === 'hari' ? '7 hari terakhir' : 'Per hari · ' + esc(p.label)) : '12 bulan terakhir'}</p></div>
           <div class="mini-seg" id="tmode"><button class="${mode === 'harian' ? 'active' : ''}" data-m="harian">Harian</button><button class="${mode === 'bulanan' ? 'active' : ''}" data-m="bulanan">Bulanan</button></div></div>
-        ${hasTrend ? lineSVG(tLabels, [{ name: 'Pengeluaran', color: '#e0475b', values: tOut, fill: true }, { name: 'Pemasukan', color: '#0fb5a6', values: tIn }])
-          + '<div class="legend-inline"><span><i class="dot" style="background:#e0475b"></i>Pengeluaran</span><span><i class="dot" style="background:#0fb5a6"></i>Pemasukan</span></div>'
+        ${hasTrend ? lineSVG(tLabels, [{ name: 'Pengeluaran', color: '#8b1e3f', values: tOut, fill: true }, { name: 'Pemasukan', color: '#0f9f8f', values: tIn }])
+          + '<div class="legend-inline"><span><i class="dot" style="background:#8b1e3f"></i>Pengeluaran</span><span><i class="dot" style="background:#0f9f8f"></i>Pemasukan</span></div>'
           : emptyState('📈', 'Belum ada data', 'Grafik tren muncul setelah ada transaksi.', false)}
       </section>
 
       <section class="card chart-card" style="margin-top:14px">
         <h3>Pemasukan vs Pengeluaran</h3><p class="sub">6 bulan terakhir</p>
-        ${hasMonthly ? barsSVG(mLabels, [{ name: 'Pemasukan', color: '#0fb5a6', values: mIn }, { name: 'Pengeluaran', color: '#7c3aed', values: mOut }])
-          + '<div class="legend-inline"><span><i class="dot" style="background:#0fb5a6"></i>Pemasukan</span><span><i class="dot" style="background:#7c3aed"></i>Pengeluaran</span></div>'
+        ${hasMonthly ? barsSVG(mLabels, [{ name: 'Pemasukan', color: '#0f9f8f', values: mIn }, { name: 'Pengeluaran', color: '#8b1e3f', values: mOut }])
+          + '<div class="legend-inline"><span><i class="dot" style="background:#0f9f8f"></i>Pemasukan</span><span><i class="dot" style="background:#8b1e3f"></i>Pengeluaran</span></div>'
           + `<div class="cat-bars" style="margin-top:14px">${mLabels.map((l, i) => ({ l, net: mIn[i] - mOut[i] })).slice(-3).reverse().map((r) => `<div class="cat-bar-top"><span>Selisih ${esc(r.l)}</span><b class="num" style="color:${r.net >= 0 ? 'var(--in)' : 'var(--out)'}">${esc(rpSigned(r.net))}</b></div>`).join('')}</div>`
           : emptyState('📊', 'Belum ada data', 'Perbandingan bulanan muncul setelah ada transaksi.', false)}
       </section>
@@ -1359,7 +1359,7 @@
       ${state.queue.length ? `<div class="section-title"><h2>Antrean offline</h2></div>
       <div class="set-group"><button class="set-item" id="sFlush"><div class="ic">⏳</div><div class="tx-main"><strong>${state.queue.length} transaksi belum terkirim</strong><span>Ketuk untuk kirim sekarang</span></div><span class="chev">›</span></button></div>` : ''}
 
-      <p class="foot-note">Catatku v1.1.1 · Data tersimpan di Google Sheets milikmu</p>
+      <p class="foot-note">Catatku v1.2 · Data tersimpan di Google Sheets milikmu</p>
     `;
     $('#sPing', v).addEventListener('click', async (e) => {
       const b = e.currentTarget; b.disabled = true; b.textContent = 'Mengecek…';
