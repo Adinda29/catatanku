@@ -38,17 +38,23 @@
   const state = {
     cfg: store.get(LS.cfg, null),            // { url, key, meta }
     items: [],                               // transaksi dari sheet
+    wallets: [], budgets: [], transfers: [],  // dompet, anggaran, transfer
+    hasDompet: false,
     queue: store.get(LS.queue, []),          // transaksi offline belum terkirim
-    prefs: Object.assign({ lastType: 'pengeluaran', customCats: { pemasukan: [], pengeluaran: [] }, trendMode: 'harian' }, store.get(LS.prefs, {})),
+    prefs: Object.assign({ lastType: 'pengeluaran', lastWallet: '', customCats: { pemasukan: [], pengeluaran: [] }, trendMode: 'harian' }, store.get(LS.prefs, {})),
     period: { type: 'bulan', start: null, end: null },
     route: 'home',
     loading: false,
     loadedAt: 0,
-    filters: { q: '', type: 'semua', kategori: '', from: '', to: '' },
+    filters: { q: '', type: 'semua', kategori: '', dompet: '', from: '', to: '' },
     historyLimit: 60
   };
   const cache = store.get(LS.cache, null);
-  if (cache && Array.isArray(cache.items)) { state.items = cache.items; state.loadedAt = cache.at || 0; }
+  if (cache && Array.isArray(cache.items)) {
+    state.items = cache.items; state.loadedAt = cache.at || 0;
+    state.wallets = cache.wallets || []; state.budgets = cache.budgets || []; state.transfers = cache.transfers || [];
+    state.hasDompet = !!cache.hasDompet;
+  }
 
   // ---------------------------------------------------------
   // Utilitas
@@ -116,7 +122,9 @@
         signal: ctrl.signal, redirect: 'follow', cache: 'no-store'
       });
     } catch (e) {
-      throw new NetworkError(e.name === 'AbortError' ? 'Koneksi terlalu lama. Coba lagi.' : 'Tidak ada koneksi internet.');
+      if (e.name === 'AbortError') throw new NetworkError('Koneksi terlalu lama. Coba lagi.');
+      if (!navigator.onLine) throw new NetworkError('Tidak ada koneksi internet.');
+      throw new NetworkError('Server Apps Script tidak bisa dihubungi. Cek deployment: "Jalankan sebagai: Saya" dan "Yang memiliki akses: Siapa saja", lalu pastikan URL berakhiran /exec.');
     } finally { clearTimeout(timer); }
     let data;
     try { data = await res.json(); } catch {
@@ -135,8 +143,12 @@
       await flushQueue();
       const data = await api('list');
       state.items = data.items || [];
+      state.wallets = data.wallets || [];
+      state.budgets = data.budgets || [];
+      state.transfers = data.transfers || [];
+      state.hasDompet = !!data.hasDompet && state.wallets.length > 0;
       state.loadedAt = Date.now();
-      store.set(LS.cache, { items: state.items, at: state.loadedAt });
+      store.set(LS.cache, { items: state.items, wallets: state.wallets, budgets: state.budgets, transfers: state.transfers, hasDompet: state.hasDompet, at: state.loadedAt });
     } catch (e) {
       if (!silent || !(e instanceof NetworkError)) toast(e.message, 'error');
     } finally {
@@ -176,10 +188,65 @@
     el.innerHTML = n ? `⏳ ${n} transaksi menunggu dikirim${navigator.onLine ? '…' : ' (offline)'}` : '';
   }
 
-  // Semua transaksi = data sheet + antrean offline
+  // Semua transaksi = data sheet + antrean offline (tanpa transfer)
   function allItems() {
     const pending = state.queue.map((q) => Object.assign({}, q, { id: 'q:' + q.qid, pending: true }));
     return pending.concat(state.items);
+  }
+  // Untuk riwayat: transaksi + transfer antar dompet
+  function historyItems() {
+    return allItems().concat(state.transfers.map((t) => Object.assign({ type: 'transfer', kategori: 'Transfer' }, t)));
+  }
+
+  // ---------- Dompet ----------
+  const walletNames = () => state.wallets.map((w) => w.nama);
+  const defaultWallet = () => (state.wallets[0] ? state.wallets[0].nama : 'Tunai');
+  const walletOf = (t) => {
+    if (!t.dompet) return defaultWallet();
+    const m = state.wallets.find((w) => w.nama.toLowerCase() === t.dompet.toLowerCase());
+    return m ? m.nama : t.dompet;
+  };
+  const walletInfo = (name) => state.wallets.find((w) => w.nama === name) || { nama: name, jenis: 'Lainnya', saldoAwal: 0 };
+  const JENIS = { Tunai: '💵', Bank: '🏦', 'E-wallet': '📱', Tabungan: '🐷', Lainnya: '💳' };
+  const walletIcon = (name) => JENIS[walletInfo(name).jenis] || '💳';
+
+  function walletBalances() {
+    const m = new Map();
+    for (const w of state.wallets) m.set(w.nama, { nama: w.nama, jenis: w.jenis, saldoAwal: w.saldoAwal, inc: 0, out: 0, tin: 0, tout: 0, count: 0 });
+    const get = (n) => { if (!m.has(n)) m.set(n, { nama: n, jenis: 'Lainnya', saldoAwal: 0, inc: 0, out: 0, tin: 0, tout: 0, count: 0, unknown: true }); return m.get(n); };
+    for (const t of allItems()) { const w = get(walletOf(t)); t.type === 'pemasukan' ? (w.inc += t.nominal) : (w.out += t.nominal); w.count++; }
+    for (const t of state.transfers) {
+      const a = get(walletOf({ dompet: t.dari })), b = get(walletOf({ dompet: t.ke }));
+      a.tout += t.nominal; b.tin += t.nominal; a.count++; b.count++;
+    }
+    return [...m.values()].map((w) => Object.assign(w, { saldo: w.saldoAwal + w.inc - w.out + w.tin - w.tout }));
+  }
+
+  // ---------- Anggaran ----------
+  function spentInMonth(kategori, month) {
+    const k = kategori.toLowerCase();
+    let sum = 0;
+    for (const t of allItems()) if (t.type === 'pengeluaran' && (t.kategori || '').toLowerCase() === k && (t.tanggal || '').startsWith(month)) sum += t.nominal;
+    return sum;
+  }
+  function budgetFor(kategori, month) {
+    const b = state.budgets.find((x) => x.kategori.toLowerCase() === String(kategori).toLowerCase());
+    return b ? { kategori: b.kategori, batas: b.batas, spent: spentInMonth(b.kategori, month) } : null;
+  }
+  function budgetStatus(month) {
+    return state.budgets.map((b) => {
+      const spent = spentInMonth(b.kategori, month);
+      return { kategori: b.kategori, batas: b.batas, spent, pct: spent / b.batas };
+    }).sort((a, b) => b.pct - a.pct);
+  }
+  function budgetBar(b) {
+    const pct = Math.round(b.pct * 100);
+    const cls = b.pct >= 1 ? 'over' : b.pct >= 0.8 ? 'warn' : 'ok';
+    return `<div class="budget-row ${cls}">
+      <div class="cat-bar-top"><span>${iconFor(b.kategori, 'pengeluaran')} ${esc(b.kategori)}</span><b class="num">${pct}%</b></div>
+      <div class="cat-bar-track"><div class="cat-bar-fill" style="width:${Math.min(100, pct)}%"></div></div>
+      <div class="budget-sub num"><span>${esc(rp(b.spent))} dari ${esc(rp(b.batas))}</span><span>${b.spent <= b.batas ? 'sisa ' + esc(rp(b.batas - b.spent)) : 'lebih ' + esc(rp(b.spent - b.batas))}</span></div>
+    </div>`;
   }
 
   // ---------------------------------------------------------
@@ -221,7 +288,7 @@
 
   function summarize(items) {
     let inc = 0, out = 0;
-    for (const t of items) t.type === 'pemasukan' ? (inc += t.nominal) : (out += t.nominal);
+    for (const t of items) { if (t.type === 'pemasukan') inc += t.nominal; else if (t.type === 'pengeluaran') out += t.nominal; }
     return { inc, out, net: inc - out, count: items.length };
   }
 
@@ -400,22 +467,31 @@
   // ---------------------------------------------------------
   // Form tambah / edit transaksi
   // ---------------------------------------------------------
-  function openTxForm(existing = null, presetType = null) {
+  function openTxForm(existing = null, presetType = null, presetWallet = null) {
     const isEdit = !!existing;
+    const useWallet = state.hasDompet;
+    const wl = walletNames();
     const f = {
       type: existing ? existing.type : (presetType || state.prefs.lastType || 'pengeluaran'),
       nominal: existing ? existing.nominal : 0,
       kategori: existing ? existing.kategori : '',
       tanggal: existing ? (existing.tanggal || today()) : today(),
-      catatan: existing ? existing.catatan : ''
+      catatan: existing ? existing.catatan : '',
+      dompet: existing ? walletOf(existing) : (presetWallet || (wl.includes(state.prefs.lastWallet) ? state.prefs.lastWallet : defaultWallet())),
+      ke: '', biaya: 0
     };
+    if (f.type === 'transfer' && !useWallet) f.type = 'pengeluaran';
+    f.ke = wl.find((w) => w !== f.dompet) || '';
+
+    const walletChips = (id, sel) => `<div class="chips wallet-chips" id="${id}">${wl.map((w) => `<button type="button" class="chip ${w === sel ? 'active' : ''}" data-w="${esc(w)}">${walletIcon(w)} ${esc(w)}</button>`).join('')}</div>`;
 
     const sh = openSheet(`
       <div class="sheet-head"><h3>${isEdit ? 'Edit Transaksi' : 'Tambah Transaksi'}</h3><button class="sheet-close" data-close aria-label="Tutup">×</button></div>
-      <div class="segmented" data-v="${f.type}" id="fType" ${isEdit ? 'aria-disabled="true"' : ''}>
+      <div class="segmented ${useWallet ? 'three' : ''}" data-v="${f.type}" id="fType" ${isEdit ? 'aria-disabled="true"' : ''}>
         <span class="thumb"></span>
         <button type="button" data-v="pengeluaran">Pengeluaran</button>
         <button type="button" data-v="pemasukan">Pemasukan</button>
+        ${useWallet ? '<button type="button" data-v="transfer">Transfer</button>' : ''}
       </div>
       ${isEdit ? '<p class="err" style="color:var(--faint)">Jenis tidak bisa diubah saat edit. Hapus lalu buat baru jika salah jenis.</p>' : ''}
 
@@ -428,11 +504,27 @@
         <p class="err" id="eAmt" role="alert"></p>
       </div>
 
-      <div class="field">
+      <div class="field" data-show="tx">
         <span class="label">Kategori</span>
         <div class="cat-grid" id="catGrid"></div>
         <p class="err" id="eCat" role="alert"></p>
+        <div class="budget-hint" id="budgetHint" hidden></div>
       </div>
+
+      ${useWallet ? `
+      <div class="field">
+        <span class="label" id="wLabel">Dompet</span>
+        ${walletChips('fWallet', f.dompet)}
+      </div>
+      <div class="field" data-show="transfer">
+        <span class="label">Ke dompet</span>
+        ${walletChips('fWalletTo', f.ke)}
+        <p class="err" id="eTo" role="alert"></p>
+      </div>
+      <div class="field" data-show="transfer">
+        <label for="fFee">Biaya admin <span style="font-weight:400;color:var(--faint)">(opsional, dicatat sebagai pengeluaran)</span></label>
+        <input id="fFee" class="input num" inputmode="numeric" autocomplete="off" placeholder="0">
+      </div>` : ''}
 
       <div class="field">
         <label for="fDate">Tanggal</label>
@@ -453,14 +545,35 @@
 
     const amt = $('#fAmt', sh), seg = $('#fType', sh), grid = $('#catGrid', sh), date = $('#fDate', sh);
 
+    const applyType = () => {
+      seg.dataset.v = f.type;
+      const isTr = f.type === 'transfer';
+      $$('[data-show="tx"]', sh).forEach((el) => { el.hidden = isTr; });
+      $$('[data-show="transfer"]', sh).forEach((el) => { el.hidden = !isTr; });
+      if ($('#wLabel', sh)) $('#wLabel', sh).textContent = isTr ? 'Dari dompet' : (f.type === 'pemasukan' ? 'Masuk ke dompet' : 'Bayar dari dompet');
+    };
+
+    const updateBudgetHint = () => {
+      const hint = $('#budgetHint', sh);
+      const b = f.type === 'pengeluaran' && f.kategori ? budgetFor(f.kategori, (date.value || today()).slice(0, 7)) : null;
+      if (!b) { hint.hidden = true; return; }
+      const after = b.spent + (isEdit ? 0 : (f.nominal || 0));
+      const pct = Math.round((after / b.batas) * 100);
+      hint.hidden = false;
+      hint.className = 'budget-hint ' + (pct >= 100 ? 'over' : pct >= 80 ? 'warn' : '');
+      hint.innerHTML = `Anggaran ${esc(b.kategori)}: ${esc(rp(after))} dari ${esc(rp(b.batas))} <b>(${pct}%)</b>${isEdit ? '' : ' termasuk transaksi ini'}`;
+    };
+
     const renderCats = () => {
+      if (f.type === 'transfer') return;
       const cats = categories(f.type);
       if (f.kategori && !cats.some((c) => c.toLowerCase() === f.kategori.toLowerCase())) cats.unshift(f.kategori);
       grid.innerHTML = cats.slice(0, 14).map((c) => `<button type="button" class="cat-chip ${c === f.kategori ? 'active' : ''}" data-c="${esc(c)}">${iconFor(c, f.type)} ${esc(c)}</button>`).join('') +
         (cats.length > 14 ? `<button type="button" class="cat-chip add" data-more>Lainnya…</button>` : '') +
         `<button type="button" class="cat-chip add" data-new>＋ Baru</button>`;
+      updateBudgetHint();
     };
-    renderCats();
+    renderCats(); applyType();
 
     const syncDateChips = () => $$('#dateChips .chip', sh).forEach((c) => c.classList.toggle('active', addDays(today(), Number(c.dataset.d)) === date.value));
     syncDateChips();
@@ -468,7 +581,8 @@
     if (!isEdit) {
       seg.addEventListener('click', (e) => {
         const b = e.target.closest('button'); if (!b) return;
-        f.type = b.dataset.v; seg.dataset.v = f.type; f.kategori = ''; renderCats(); vibrate(8);
+        if (b.dataset.v === 'transfer' && wl.length < 2) { toast('Tambah minimal 2 dompet dulu di Setelan → Dompet', 'info', 3500); return; }
+        f.type = b.dataset.v; f.kategori = ''; applyType(); renderCats(); vibrate(8);
       });
     }
 
@@ -477,11 +591,13 @@
       f.nominal = Number(digits || 0);
       amt.value = digits ? nf.format(f.nominal) : '';
       $('#amtWrap', sh).classList.remove('invalid'); $('#eAmt', sh).textContent = '';
+      updateBudgetHint();
     });
     $('#quickAmt', sh).addEventListener('click', (e) => {
       const b = e.target.closest('button'); if (!b) return;
       f.nominal = (f.nominal || 0) + Number(b.dataset.v);
       amt.value = nf.format(f.nominal); $('#amtWrap', sh).classList.remove('invalid'); $('#eAmt', sh).textContent = ''; vibrate(6);
+      updateBudgetHint();
     });
 
     grid.addEventListener('click', async (e) => {
@@ -494,28 +610,64 @@
       f.kategori = b.dataset.c; vibrate(6);
       $$('.cat-chip', grid).forEach((c) => c.classList.toggle('active', c === b));
       grid.classList.remove('invalid'); $('#eCat', sh).textContent = '';
+      updateBudgetHint();
+    });
+
+    const bindWallet = (id, key) => {
+      const el = $('#' + id, sh); if (!el) return;
+      el.addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return;
+        f[key] = b.dataset.w; vibrate(6);
+        $$('.chip', el).forEach((c) => c.classList.toggle('active', c === b));
+        if ($('#eTo', sh)) $('#eTo', sh).textContent = '';
+      });
+    };
+    bindWallet('fWallet', 'dompet'); bindWallet('fWalletTo', 'ke');
+    const fee = $('#fFee', sh);
+    fee?.addEventListener('input', () => {
+      const digits = fee.value.replace(/\D/g, '').replace(/^0+/, '').slice(0, 10);
+      f.biaya = Number(digits || 0); fee.value = digits ? nf.format(f.biaya) : '';
     });
 
     $('#dateChips', sh).addEventListener('click', (e) => {
       const b = e.target.closest('button'); if (!b) return;
-      date.value = addDays(today(), Number(b.dataset.d)); syncDateChips();
+      date.value = addDays(today(), Number(b.dataset.d)); syncDateChips(); updateBudgetHint();
     });
-    date.addEventListener('change', syncDateChips);
+    date.addEventListener('change', () => { syncDateChips(); updateBudgetHint(); });
     const note = $('#fNote', sh);
     const autoGrow = () => { note.style.height = 'auto'; note.style.height = Math.min(note.scrollHeight, 140) + 'px'; };
     note.addEventListener('input', autoGrow);
 
     const save = $('#fSave', sh);
+    const resetBtn = () => { save.disabled = false; save.textContent = isEdit ? 'Simpan Perubahan' : 'Simpan'; };
     save.addEventListener('click', async () => {
       // validasi
       let ok = true;
+      const isTr = f.type === 'transfer';
       if (!f.nominal || f.nominal <= 0) { ok = false; $('#amtWrap', sh).classList.add('invalid'); $('#eAmt', sh).textContent = 'Nominal wajib diisi dan harus lebih dari 0.'; }
-      if (!f.kategori) { ok = false; grid.classList.add('invalid'); $('#eCat', sh).textContent = 'Pilih salah satu kategori.'; }
+      if (!isTr && !f.kategori) { ok = false; grid.classList.add('invalid'); $('#eCat', sh).textContent = 'Pilih salah satu kategori.'; }
+      if (isTr && (!f.ke || f.ke === f.dompet)) { ok = false; $('#eTo', sh).textContent = 'Pilih dompet tujuan yang berbeda dari dompet asal.'; }
       if (!date.value) { ok = false; date.classList.add('invalid'); }
       if (!ok) { vibrate([20, 40, 20]); return; }
 
-      const tx = { type: f.type, nominal: f.nominal, kategori: f.kategori, tanggal: date.value, catatan: note.value.trim() };
       save.disabled = true; save.innerHTML = '<span class="spinner"></span> Menyimpan…';
+
+      if (isTr) {
+        try {
+          await api('addTransfer', { tr: { dari: f.dompet, ke: f.ke, nominal: f.nominal, biaya: f.biaya, tanggal: date.value, catatan: note.value.trim() } });
+          toast(`Transfer ${rp(f.nominal)} ${f.dompet} → ${f.ke} tersimpan`, 'success');
+          state.prefs.lastType = 'pengeluaran'; state.prefs.lastWallet = f.dompet; store.set(LS.prefs, state.prefs);
+          vibrate(15); closeSheet(); loadData({ silent: true });
+        } catch (e) {
+          toast((e instanceof NetworkError ? 'Transfer butuh koneksi internet. ' : 'Gagal menyimpan: ') + e.message, 'error');
+          resetBtn();
+        }
+        return;
+      }
+
+      const tx = { type: f.type, nominal: f.nominal, kategori: f.kategori, tanggal: date.value, catatan: note.value.trim() };
+      if (useWallet) tx.dompet = f.dompet;
+      const budgetBefore = !isEdit && f.type === 'pengeluaran' ? budgetFor(f.kategori, date.value.slice(0, 7)) : null;
       try {
         if (isEdit && existing.pending) {
           const q = state.queue.find((x) => 'q:' + x.qid === existing.id);
@@ -528,25 +680,34 @@
           await api('add', { tx });
           toast(`${f.type === 'pemasukan' ? 'Pemasukan' : 'Pengeluaran'} ${rp(f.nominal)} tersimpan`, 'success');
         }
-        state.prefs.lastType = f.type; store.set(LS.prefs, state.prefs);
+        state.prefs.lastType = f.type; state.prefs.lastWallet = f.dompet; store.set(LS.prefs, state.prefs);
         vibrate(15);
         closeSheet();
+        budgetWarning(budgetBefore, f.nominal);
         loadData({ silent: true });
       } catch (e) {
         if (e instanceof NetworkError && !isEdit) {
           state.queue.push(Object.assign({ qid: Date.now().toString(36) + Math.random().toString(36).slice(2, 6) }, tx));
           saveQueue();
-          state.prefs.lastType = f.type; store.set(LS.prefs, state.prefs);
+          state.prefs.lastType = f.type; state.prefs.lastWallet = f.dompet; store.set(LS.prefs, state.prefs);
           toast('Offline — transaksi disimpan di HP dan akan dikirim otomatis saat online', 'info', 4000);
-          closeSheet(); render();
+          closeSheet(); budgetWarning(budgetBefore, f.nominal); render();
         } else {
           toast('Gagal menyimpan: ' + e.message, 'error');
-          save.disabled = false; save.textContent = isEdit ? 'Simpan Perubahan' : 'Simpan';
+          resetBtn();
         }
       }
     });
 
     if (!isEdit) setTimeout(() => amt.focus(), 360);
+  }
+
+  function budgetWarning(b, added) {
+    if (!b) return;
+    const before = b.spent / b.batas, after = (b.spent + added) / b.batas;
+    const pct = Math.round(after * 100);
+    if (after >= 1 && before < 1) setTimeout(() => toast(`⚠️ Anggaran ${b.kategori} terlampaui: ${rp(b.spent + added)} dari ${rp(b.batas)} (${pct}%)`, 'error', 4500), 900);
+    else if (after >= 0.8 && before < 0.8) setTimeout(() => toast(`Anggaran ${b.kategori} sudah ${pct}% — sisa ${rp(b.batas - b.spent - added)}`, 'info', 4500), 900);
   }
 
   function promptCategory(type, showAll) {
@@ -582,6 +743,7 @@
 
   // Detail transaksi → edit / hapus
   function openDetail(tx) {
+    if (tx.type === 'transfer') return openTransferDetail(tx);
     const isIn = tx.type === 'pemasukan';
     const sh = openSheet(`
       <div class="sheet-head"><h3>Detail Transaksi</h3><button class="sheet-close" data-close aria-label="Tutup">×</button></div>
@@ -592,6 +754,7 @@
       <div class="detail-amt num" style="color:${isIn ? 'var(--in)' : 'var(--text)'}">${isIn ? '+' : '−'} ${rp(tx.nominal)}</div>
       <dl class="detail-list">
         <div><dt>Tanggal</dt><dd>${esc(fmtDate(tx.tanggal, true))}</dd></div>
+        ${state.hasDompet ? `<div><dt>Dompet</dt><dd>${walletIcon(walletOf(tx))} ${esc(walletOf(tx))}${tx.dompet ? '' : ' <span style="color:var(--faint);font-weight:400">(bawaan)</span>'}</dd></div>` : ''}
         <div><dt>Catatan</dt><dd>${esc(tx.catatan || '—')}</dd></div>
         <div><dt>Lokasi di sheet</dt><dd>${tx.pending ? 'Menunggu dikirim' : `${isIn ? 'Pemasukan' : 'Pengeluaran'}, baris ${tx.row}`}</dd></div>
       </dl>
@@ -624,6 +787,189 @@
         toast('Gagal menghapus: ' + e.message, 'error');
         btn.disabled = false; btn.textContent = '🗑️ Hapus';
       }
+    });
+  }
+
+  function openTransferDetail(t) {
+    const sh = openSheet(`
+      <div class="sheet-head"><h3>Detail Transfer</h3><button class="sheet-close" data-close aria-label="Tutup">×</button></div>
+      <div class="transfer-flow">
+        <div><div class="tx-ic tr">${walletIcon(walletOf({ dompet: t.dari }))}</div><b>${esc(t.dari)}</b></div>
+        <span class="arrow">→</span>
+        <div><div class="tx-ic tr">${walletIcon(walletOf({ dompet: t.ke }))}</div><b>${esc(t.ke)}</b></div>
+      </div>
+      <div class="detail-amt num" style="text-align:center">${rp(t.nominal)}</div>
+      <dl class="detail-list">
+        <div><dt>Tanggal</dt><dd>${esc(fmtDate(t.tanggal, true))}</dd></div>
+        <div><dt>Biaya admin</dt><dd>${t.biaya ? esc(rp(t.biaya)) + ' <span style="color:var(--faint);font-weight:400">(tercatat di Pengeluaran)</span>' : '—'}</dd></div>
+        <div><dt>Catatan</dt><dd>${esc(t.catatan || '—')}</dd></div>
+        <div><dt>Lokasi di sheet</dt><dd>Transfer, baris ${t.row}</dd></div>
+      </dl>
+      <button class="btn btn-danger" id="tDel">🗑️ Hapus Transfer</button>`);
+    $('#tDel', sh).addEventListener('click', async () => {
+      const yes = await confirmDialog({
+        title: 'Hapus transfer ini?',
+        text: `${esc(t.dari)} → ${esc(t.ke)} · ${esc(rp(t.nominal))}<br>Baris akan dihapus dari tab Transfer.${t.biaya ? ' <b>Biaya admin di sheet Pengeluaran tidak ikut terhapus</b> — hapus terpisah jika perlu.' : ''}`,
+        okText: 'Ya, Hapus'
+      });
+      if (!yes) return;
+      const btn = $('#tDel', sh); btn.disabled = true; btn.textContent = 'Menghapus…';
+      try {
+        await api('deleteTransfer', { tr: { row: t.row, fp: t.fp } });
+        state.transfers = state.transfers.filter((x) => x.id !== t.id);
+        toast('Transfer dihapus', 'success'); closeSheet(); render(); loadData({ silent: true });
+      } catch (e) { toast('Gagal menghapus: ' + e.message, 'error'); btn.disabled = false; btn.textContent = '🗑️ Hapus Transfer'; }
+    });
+  }
+
+  // ---------------------------------------------------------
+  // Dompet: daftar, detail, tambah/edit
+  // ---------------------------------------------------------
+  function walletCards() {
+    const bal = walletBalances();
+    const total = bal.reduce((a, w) => a + w.saldo, 0);
+    return { total, html: `<div class="wallet-strip" id="walletStrip">${bal.map((w) => `
+      <button class="wallet-card ${w.saldo < 0 ? 'neg' : ''}" data-wallet="${esc(w.nama)}">
+        <span class="w-ic">${JENIS[w.jenis] || '💳'}</span>
+        <span class="w-name">${esc(w.nama)}</span>
+        <strong class="num">${esc(rpSigned(w.saldo))}</strong>
+      </button>`).join('')}
+      <button class="wallet-card add" data-wallet-add><span class="w-ic">＋</span><span class="w-name">Dompet baru</span></button>
+    </div>` };
+  }
+
+  function openWalletDetail(name) {
+    const w = walletBalances().find((x) => x.nama === name);
+    if (!w) return;
+    const rows = historyItems().filter((t) => t.type === 'transfer' ? (walletOf({ dompet: t.dari }) === name || walletOf({ dompet: t.ke }) === name) : walletOf(t) === name)
+      .sort(sortTx).slice(0, 30);
+    const sh = openSheet(`
+      <div class="sheet-head"><h3>${JENIS[w.jenis] || '💳'} ${esc(w.nama)}</h3><button class="sheet-close" data-close aria-label="Tutup">×</button></div>
+      <div class="wallet-hero ${w.saldo < 0 ? 'neg' : ''}"><p>Saldo saat ini</p><div class="wh-amt num">${esc(rpSigned(w.saldo))}</div>
+        <div class="wallet-hero-row num"><span>Saldo awal ${esc(rpSigned(w.saldoAwal))}</span><span>+${esc(short(w.inc + w.tin))} / −${esc(short(w.out + w.tout))}</span></div></div>
+      ${w.unknown ? `<p class="budget-hint warn">Dompet "${esc(w.nama)}" dipakai di sheet tapi belum terdaftar. Tambahkan lewat "Atur saldo" agar saldo awalnya tercatat.</p>` : ''}
+      <div class="row-2" style="margin:14px 0 4px">
+        <button class="btn btn-soft" id="wAdj" style="height:48px;font-size:14.5px">⚖️ Atur saldo</button>
+        <button class="btn btn-soft" id="wTr" style="height:48px;font-size:14.5px;margin-top:0">⇄ Transfer</button>
+      </div>
+      <div class="section-title"><h2>Riwayat dompet</h2></div>
+      ${rows.length ? `<div class="tx-list">${rows.map(txRow).join('')}</div>` : '<p style="color:var(--muted);text-align:center;font-size:14px">Belum ada transaksi di dompet ini.</p>'}`);
+    $('#wAdj', sh).addEventListener('click', () => { closeSheet(); setTimeout(() => openWalletForm(name), 360); });
+    $('#wTr', sh).addEventListener('click', () => {
+      if (state.wallets.length < 2) return toast('Tambah minimal 2 dompet dulu', 'info');
+      closeSheet(); setTimeout(() => openTxForm(null, 'transfer', name), 360);
+    });
+    sh.addEventListener('click', (e) => {
+      const b = e.target.closest('.tx'); if (!b) return;
+      const t = historyItems().find((x) => x.id === b.dataset.id);
+      if (t) { closeSheet(); setTimeout(() => openDetail(t), 360); }
+    });
+  }
+
+  /** Tambah dompet baru (name=null) atau atur dompet yang ada. */
+  function openWalletForm(name = null, onDone = null) {
+    const bal = walletBalances();
+    const cur = name ? bal.find((x) => x.nama === name) : null;
+    const registered = name ? state.wallets.some((w) => w.nama === name) : false;
+    const movement = cur ? cur.saldo - cur.saldoAwal : 0;
+    const used = cur ? cur.count > 0 : false;
+    const f = { nama: name || '', jenis: cur ? cur.jenis : 'Bank', saldo: cur ? cur.saldo : 0 };
+    const sh = openSheet(`
+      <div class="sheet-head"><h3>${name ? 'Atur Dompet' : 'Dompet Baru'}</h3><button class="sheet-close" data-close aria-label="Tutup">×</button></div>
+      <label class="label" for="wName">Nama dompet</label>
+      <input id="wName" class="input" maxlength="40" placeholder="mis. BCA, DANA, Tunai" value="${esc(f.nama)}" ${used ? 'readonly style="color:var(--muted)"' : ''}>
+      ${used ? '<p class="err" style="color:var(--faint)">Nama tidak bisa diubah karena sudah dipakai di transaksi.</p>' : ''}
+      <div class="field"><span class="label">Jenis</span>
+        <div class="chips" id="wType">${Object.keys(JENIS).map((j) => `<button type="button" class="chip ${j === f.jenis ? 'active' : ''}" data-j="${j}">${JENIS[j]} ${j}</button>`).join('')}</div></div>
+      <div class="field"><label for="wSaldo">Saldo saat ini</label>
+        <div class="amount-wrap"><span>Rp</span><button type="button" class="neg-toggle ${f.saldo < 0 ? 'on' : ''}" id="wNeg" aria-label="Saldo minus">−</button>
+          <input id="wSaldo" class="amount-input num" inputmode="numeric" autocomplete="off" placeholder="0" value="${f.saldo ? nf.format(Math.abs(Math.round(f.saldo))) : ''}"></div>
+        <p class="err" style="color:var(--muted)">Isi sesuai saldo asli di ${name ? esc(name) : 'dompet ini'} sekarang (cek m-banking/e-wallet). Aplikasi menghitung saldo awalnya otomatis.</p>
+      </div>
+      <p class="err" id="wErr" role="alert"></p>
+      <div class="save-bar"><button class="btn btn-primary" id="wSave">Simpan</button>
+        ${name && registered && !used && state.wallets.length > 1 ? '<button class="btn btn-danger" id="wDel">Hapus dompet</button>' : ''}</div>`);
+    let neg = f.saldo < 0;
+    const inp = $('#wSaldo', sh);
+    inp.addEventListener('input', () => { const d = inp.value.replace(/\D/g, '').replace(/^0+/, '').slice(0, 13); inp.value = d ? nf.format(Number(d)) : ''; });
+    $('#wNeg', sh).addEventListener('click', (e) => { neg = !neg; e.currentTarget.classList.toggle('on', neg); });
+    $('#wType', sh).addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; f.jenis = b.dataset.j; $$('#wType .chip', sh).forEach((c) => c.classList.toggle('active', c === b)); });
+
+    const persist = async (list, msg) => {
+      await api('saveWallets', { wallets: list });
+      state.wallets = list; state.hasDompet = state.hasDompet || list.length > 0;
+      toast(msg, 'success'); closeSheet(); render(); if (onDone) setTimeout(onDone, 380); loadData({ silent: true });
+    };
+    $('#wSave', sh).addEventListener('click', async (e) => {
+      const nama = $('#wName', sh).value.trim().replace(/\s+/g, ' ');
+      const saldoNow = Number(inp.value.replace(/\D/g, '') || 0) * (neg ? -1 : 1);
+      if (!nama) { $('#wErr', sh).textContent = 'Nama dompet wajib diisi.'; return; }
+      if (state.wallets.some((w) => w.nama.toLowerCase() === nama.toLowerCase() && w.nama !== name)) { $('#wErr', sh).textContent = 'Nama dompet sudah ada.'; return; }
+      const entry = { nama, jenis: f.jenis, saldoAwal: Math.round(saldoNow - movement) };
+      const list = state.wallets.map((w) => Object.assign({}, w));
+      const i = list.findIndex((w) => w.nama === name);
+      if (i >= 0) list[i] = entry; else list.push(entry);
+      const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spinner"></span> Menyimpan…';
+      try { await persist(list, name ? `Dompet ${nama} diperbarui` : `Dompet ${nama} ditambahkan`); }
+      catch (err) { toast('Gagal menyimpan: ' + err.message, 'error'); b.disabled = false; b.textContent = 'Simpan'; }
+    });
+    $('#wDel', sh)?.addEventListener('click', async () => {
+      const ok = await confirmDialog({ title: `Hapus dompet ${esc(name)}?`, text: 'Dompet ini belum dipakai di transaksi mana pun, jadi aman dihapus.', okText: 'Hapus' });
+      if (!ok) return;
+      try { await persist(state.wallets.filter((w) => w.nama !== name), `Dompet ${name} dihapus`); }
+      catch (err) { toast('Gagal menghapus: ' + err.message, 'error'); }
+    });
+    if (!name) setTimeout(() => $('#wName', sh).focus(), 360);
+  }
+
+  function openWalletManager() {
+    const draw = () => {
+      const bal = walletBalances();
+      return `<div class="sheet-head"><h3>Dompet</h3><button class="sheet-close" data-close aria-label="Tutup">×</button></div>
+        <div class="set-group">${bal.map((w) => `<button class="set-item" data-w="${esc(w.nama)}"><div class="ic">${JENIS[w.jenis] || '💳'}</div>
+          <div class="tx-main"><strong>${esc(w.nama)}${w.unknown ? ' <span class="badge-pending">belum terdaftar</span>' : ''}</strong><span>${esc(w.jenis)} · ${w.count} transaksi</span></div>
+          <b class="num" style="white-space:nowrap;${w.saldo < 0 ? 'color:var(--out)' : ''}">${esc(rpSigned(w.saldo))}</b></button>`).join('')}</div>
+        <p class="err" style="color:var(--muted);margin-top:10px">Dompet pertama (${esc(defaultWallet())}) dipakai untuk transaksi lama yang belum punya dompet.</p>
+        <div class="field"><button class="btn btn-primary" id="wmAdd">＋ Tambah Dompet</button></div>`;
+    };
+    const sh = openSheet(draw());
+    sh.addEventListener('click', (e) => {
+      const it = e.target.closest('[data-w]');
+      if (it) { closeSheet(); setTimeout(() => openWalletForm(it.dataset.w, openWalletManager), 360); }
+      if (e.target.closest('#wmAdd')) { closeSheet(); setTimeout(() => openWalletForm(null, openWalletManager), 360); }
+    });
+  }
+
+  // ---------------------------------------------------------
+  // Anggaran: editor
+  // ---------------------------------------------------------
+  function openBudgetEditor() {
+    const month = today().slice(0, 7);
+    const cats = categories('pengeluaran').filter((c) => c !== 'Biaya Admin' || state.budgets.some((b) => b.kategori === c));
+    for (const b of state.budgets) if (!cats.some((c) => c.toLowerCase() === b.kategori.toLowerCase())) cats.unshift(b.kategori);
+    const val = (c) => { const b = state.budgets.find((x) => x.kategori.toLowerCase() === c.toLowerCase()); return b ? nf.format(b.batas) : ''; };
+    const sh = openSheet(`
+      <div class="sheet-head"><h3>Anggaran Bulanan</h3><button class="sheet-close" data-close aria-label="Tutup">×</button></div>
+      <p style="color:var(--muted);font-size:13.5px;margin:0 0 6px">Isi batas pengeluaran per bulan. Kosongkan kategori yang tidak perlu dibatasi. Angka kecil di bawah = terpakai bulan ini.</p>
+      <div class="budget-edit">${cats.map((c, i) => `
+        <label class="budget-edit-row" for="bg${i}">
+          <span class="be-name">${iconFor(c, 'pengeluaran')} ${esc(c)}<small class="num">${esc(rp(spentInMonth(c, month)))} terpakai</small></span>
+          <span class="be-input"><span>Rp</span><input id="bg${i}" data-c="${esc(c)}" class="num" inputmode="numeric" autocomplete="off" placeholder="—" value="${val(c)}"></span>
+        </label>`).join('')}</div>
+      <p class="budget-total num" id="bgTotal"></p>
+      <div class="save-bar"><button class="btn btn-primary" id="bgSave">Simpan Anggaran</button></div>`);
+    const inputs = $$('.be-input input', sh);
+    const total = () => { const t = inputs.reduce((a, i) => a + Number(i.value.replace(/\D/g, '') || 0), 0); $('#bgTotal', sh).textContent = t ? 'Total anggaran: ' + rp(t) + ' / bulan' : ''; };
+    inputs.forEach((i) => i.addEventListener('input', () => { const d = i.value.replace(/\D/g, '').replace(/^0+/, '').slice(0, 12); i.value = d ? nf.format(Number(d)) : ''; total(); }));
+    total();
+    $('#bgSave', sh).addEventListener('click', async (e) => {
+      const list = inputs.map((i) => ({ kategori: i.dataset.c, batas: Number(i.value.replace(/\D/g, '') || 0) })).filter((b) => b.batas > 0);
+      const b = e.currentTarget; b.disabled = true; b.innerHTML = '<span class="spinner"></span> Menyimpan…';
+      try {
+        await api('saveBudgets', { budgets: list });
+        state.budgets = list; toast(list.length ? `Anggaran ${list.length} kategori tersimpan` : 'Anggaran dikosongkan', 'success');
+        closeSheet(); render(); loadData({ silent: true });
+      } catch (err) { toast('Gagal menyimpan: ' + err.message, 'error'); b.disabled = false; b.textContent = 'Simpan Anggaran'; }
     });
   }
 
@@ -698,17 +1044,23 @@
   }
 
   function txRow(t) {
+    if (t.type === 'transfer') {
+      return `<button class="tx" data-id="${esc(t.id)}">
+        <div class="tx-ic tr">⇄</div>
+        <div class="tx-main"><strong>Transfer</strong><span>${esc(t.dari)} → ${esc(t.ke)}${t.catatan ? ' · ' + esc(t.catatan) : ''}</span></div>
+        <div class="tx-amt num tr">${esc(rp(t.nominal))}</div></button>`;
+    }
     const isIn = t.type === 'pemasukan';
     return `<button class="tx" data-id="${esc(t.id)}">
       <div class="tx-ic ${isIn ? 'in' : 'out'}">${iconFor(t.kategori, t.type)}</div>
-      <div class="tx-main"><strong>${esc(t.kategori || 'Tanpa kategori')}${t.pending ? '<span class="badge-pending">offline</span>' : ''}</strong><span>${esc(t.catatan || (isIn ? 'Pemasukan' : 'Pengeluaran'))}</span></div>
+      <div class="tx-main"><strong>${esc(t.kategori || 'Tanpa kategori')}${t.pending ? '<span class="badge-pending">offline</span>' : ''}</strong><span>${state.hasDompet ? esc(walletOf(t)) + (t.catatan ? ' · ' : '') : ''}${esc(t.catatan || (state.hasDompet ? '' : (isIn ? 'Pemasukan' : 'Pengeluaran')))}</span></div>
       <div class="tx-amt num ${isIn ? 'in' : 'out'}">${isIn ? '+' : '−'}${esc(rp(t.nominal))}</div>
     </button>`;
   }
   function bindTxClicks(v) {
     v.addEventListener('click', (e) => {
       const b = e.target.closest('.tx'); if (!b) return;
-      const t = allItems().find((x) => x.id === b.dataset.id);
+      const t = historyItems().find((x) => x.id === b.dataset.id);
       if (t) openDetail(t);
     });
   }
@@ -747,7 +1099,12 @@
     const items = allItems();
     const p = periodRange();
     const ins = computeInsights(items, p);
-    const recent = items.slice().sort(sortTx).slice(0, 6);
+    const recent = historyItems().sort(sortTx).slice(0, 6);
+    const wc = state.hasDompet ? walletCards() : null;
+    const month = today().slice(0, 7);
+    const bs = budgetStatus(month);
+    const bTot = bs.reduce((a, b) => a + b.batas, 0), bUsed = bs.reduce((a, b) => a + Math.min(b.spent, b.batas) , 0);
+    const bSpentAll = bs.reduce((a, b) => a + b.spent, 0);
 
     v.innerHTML = `
       ${periodChips()}
@@ -759,6 +1116,14 @@
           <div class="hero-stat"><p><span class="dot" style="background:#ffb3c0"></span>Pengeluaran</p><strong class="num">${esc(rp(ins.s.out))}</strong></div>
         </div>
       </section>
+      ${wc ? `<div class="section-title"><h2>Dompet <span class="h-sub num">· total ${esc(rpSigned(wc.total))}</span></h2><button class="link" data-wallets>Kelola</button></div>${wc.html}` : ''}
+      ${state.hasDompet || state.budgets.length ? `<div class="section-title"><h2>Anggaran ${esc(BULAN_P[Number(month.slice(5)) - 1])}</h2>${bs.length ? '<button class="link" data-budget>Atur</button>' : ''}</div>
+        ${bs.length ? `<div class="card budget-card">
+            <div class="budget-sum num"><span>Terpakai <b>${esc(rp(bSpentAll))}</b> dari ${esc(rp(bTot))}</span><b>${Math.round((bSpentAll / bTot) * 100)}%</b></div>
+            ${bs.slice(0, 3).map(budgetBar).join('')}
+            ${bs.length > 3 ? `<button class="link" data-go="analisis" style="margin-top:6px">Lihat ${bs.length - 3} kategori lainnya</button>` : ''}
+          </div>`
+        : `<button class="card cta-card" data-budget><span class="ic">🎯</span><span class="tx-main"><strong>Atur anggaran bulanan</strong><span>Batasi pengeluaran per kategori & dapat peringatan saat hampir habis</span></span><span class="chev">›</span></button>`}` : ''}
       <div class="section-title"><h2>Insight</h2><button class="link" data-go="analisis">Lihat grafik</button></div>
       ${insightCards(ins, p)}
       <div class="section-title"><h2>Transaksi terbaru</h2>${recent.length ? '<button class="link" data-go="riwayat">Semua</button>' : ''}</div>
@@ -778,13 +1143,17 @@
   function filteredHistory() {
     const F = state.filters;
     const q = F.q.trim().toLowerCase();
-    return allItems().filter((t) => {
+    return historyItems().filter((t) => {
       if (F.type !== 'semua' && t.type !== F.type) return false;
       if (F.kategori && t.kategori !== F.kategori) return false;
+      if (F.dompet) {
+        if (t.type === 'transfer') { if (walletOf({ dompet: t.dari }) !== F.dompet && walletOf({ dompet: t.ke }) !== F.dompet) return false; }
+        else if (walletOf(t) !== F.dompet) return false;
+      }
       if (F.from && (!t.tanggal || t.tanggal < F.from)) return false;
       if (F.to && (!t.tanggal || t.tanggal > F.to)) return false;
       if (q) {
-        const hay = `${t.kategori} ${t.catatan} ${t.nominal} ${nf.format(t.nominal)} ${fmtDate(t.tanggal)}`.toLowerCase();
+        const hay = `${t.kategori} ${t.catatan} ${t.nominal} ${nf.format(t.nominal)} ${fmtDate(t.tanggal)} ${t.dompet || ''} ${t.dari || ''} ${t.ke || ''}`.toLowerCase();
         if (!hay.includes(q)) return false;
       }
       return true;
@@ -793,7 +1162,7 @@
 
   function historyResults() {
     const list = filteredHistory();
-    const total = allItems().length;
+    const total = historyItems().length;
     const s = summarize(list);
     const shown = list.slice(0, state.historyLimit);
     const groups = [];
@@ -816,7 +1185,7 @@
   function renderHistory(v) {
     const F = state.filters;
     const cats = [...new Set(allItems().map((t) => t.kategori).filter(Boolean))].sort((a, b) => a.localeCompare(b, 'id'));
-    const activeFilters = (F.kategori ? 1 : 0) + (F.from || F.to ? 1 : 0);
+    const activeFilters = (F.kategori ? 1 : 0) + (F.dompet ? 1 : 0) + (F.from || F.to ? 1 : 0);
 
     v.innerHTML = `
       <div class="search">
@@ -825,7 +1194,7 @@
       </div>
       <div class="filter-row">
         <div class="chips" id="htype" style="padding:0;flex:1">
-          ${[['semua', 'Semua'], ['pengeluaran', 'Keluar'], ['pemasukan', 'Masuk']].map(([k, l]) => `<button class="chip ${F.type === k ? 'active' : ''}" data-t="${k}">${l}</button>`).join('')}
+          ${[['semua', 'Semua'], ['pengeluaran', 'Keluar'], ['pemasukan', 'Masuk']].concat(state.transfers.length ? [['transfer', 'Transfer']] : []).map(([k, l]) => `<button class="chip ${F.type === k ? 'active' : ''}" data-t="${k}">${l}</button>`).join('')}
         </div>
         <button class="filter-btn ${activeFilters ? 'on' : ''}" id="hfilter">⚙︎ Filter${activeFilters ? ` (${activeFilters})` : ''}</button>
       </div>
@@ -844,20 +1213,22 @@
     });
     res.addEventListener('click', (e) => {
       if (e.target.closest('[data-more]')) { state.historyLimit += 60; refresh(); }
-      if (e.target.closest('[data-reset]')) { Object.assign(F, { q: '', type: 'semua', kategori: '', from: '', to: '' }); renderHistory(v); }
+      if (e.target.closest('[data-reset]')) { Object.assign(F, { q: '', type: 'semua', kategori: '', dompet: '', from: '', to: '' }); renderHistory(v); }
     });
     $('#hfilter', v).addEventListener('click', () => {
       const sh = openSheet(`
         <div class="sheet-head"><h3>Filter Riwayat</h3><button class="sheet-close" data-close aria-label="Tutup">×</button></div>
         <label class="label" for="fk">Kategori</label>
         <select id="fk" class="input"><option value="">Semua kategori</option>${cats.map((c) => `<option value="${esc(c)}" ${c === F.kategori ? 'selected' : ''}>${esc(c)}</option>`).join('')}</select>
+        ${state.hasDompet ? `<label class="label" for="fw" style="margin-top:14px">Dompet</label>
+        <select id="fw" class="input"><option value="">Semua dompet</option>${walletBalances().map((w) => `<option value="${esc(w.nama)}" ${w.nama === F.dompet ? 'selected' : ''}>${esc(w.nama)}</option>`).join('')}</select>` : ''}
         <div class="row-2" style="margin-top:14px">
           <div><label class="label" for="ff">Dari tanggal</label><input type="date" id="ff" class="input" value="${F.from}"></div>
           <div><label class="label" for="ft">Sampai</label><input type="date" id="ft" class="input" value="${F.to}"></div>
         </div>
         <div class="field"><button class="btn btn-primary" id="fapply">Terapkan</button><button class="btn btn-soft" id="fclear">Hapus filter</button></div>`);
-      $('#fapply', sh).addEventListener('click', () => { F.kategori = $('#fk', sh).value; F.from = $('#ff', sh).value; F.to = $('#ft', sh).value; state.historyLimit = 60; closeSheet(); setTimeout(() => renderHistory(v), 50); });
-      $('#fclear', sh).addEventListener('click', () => { F.kategori = ''; F.from = ''; F.to = ''; closeSheet(); setTimeout(() => renderHistory(v), 50); });
+      $('#fapply', sh).addEventListener('click', () => { F.kategori = $('#fk', sh).value; F.dompet = $('#fw', sh) ? $('#fw', sh).value : ''; F.from = $('#ff', sh).value; F.to = $('#ft', sh).value; state.historyLimit = 60; closeSheet(); setTimeout(() => renderHistory(v), 50); });
+      $('#fclear', sh).addEventListener('click', () => { F.kategori = ''; F.dompet = ''; F.from = ''; F.to = ''; closeSheet(); setTimeout(() => renderHistory(v), 50); });
     });
   }
 
@@ -915,6 +1286,13 @@
         : emptyState('🥧', 'Belum ada pengeluaran', 'Tidak ada pengeluaran di periode ini.', false)}
       </section>
 
+      ${state.budgets.length ? (() => {
+        const m = p.end.slice(0, 7); const bs = budgetStatus(m);
+        return `<section class="card chart-card budget-card" style="margin-top:14px">
+          <div class="chart-head"><div><h3>Anggaran</h3><p class="sub">${esc(BULAN_P[Number(m.slice(5)) - 1])} ${m.slice(0, 4)} · ${bs.filter((b) => b.pct >= 1).length} terlampaui</p></div><button class="link" data-budget>Atur</button></div>
+          ${bs.map(budgetBar).join('')}</section>`;
+      })() : ''}
+
       <section class="card chart-card" style="margin-top:14px">
         <div class="chart-head"><div><h3>Tren</h3><p class="sub">${mode === 'harian' && spanDays <= 92 ? (p.type === 'hari' ? '7 hari terakhir' : 'Per hari · ' + esc(p.label)) : '12 bulan terakhir'}</p></div>
           <div class="mini-seg" id="tmode"><button class="${mode === 'harian' ? 'active' : ''}" data-m="harian">Harian</button><button class="${mode === 'bulanan' ? 'active' : ''}" data-m="bulanan">Bulanan</button></div></div>
@@ -960,6 +1338,13 @@
         <div class="row-2" style="margin-top:14px"><button class="btn btn-soft" id="sPing" style="height:48px;font-size:14.5px">🔌 Tes koneksi</button><button class="btn btn-soft" id="sSync" style="height:48px;font-size:14.5px;margin-top:0">🔄 Sinkron</button></div>
       </div>
 
+      ${state.hasDompet ? `<div class="section-title"><h2>Dompet & Anggaran</h2></div>
+      <div class="set-group">
+        <button class="set-item" data-wallets><div class="ic">👛</div><div class="tx-main"><strong>Dompet</strong><span>${state.wallets.length} dompet · tambah, atur saldo, hapus</span></div><span class="chev">›</span></button>
+        <button class="set-item" data-budget><div class="ic">🎯</div><div class="tx-main"><strong>Anggaran bulanan</strong><span>${state.budgets.length ? state.budgets.length + ' kategori dibatasi' : 'Belum diatur'}</span></div><span class="chev">›</span></button>
+      </div>` : (state.loadedAt ? `<div class="section-title"><h2>Dompet & Anggaran</h2></div>
+      <div class="card budget-hint warn" style="margin:0">Fitur dompet & anggaran belum aktif. Di Apps Script: tempel <b>Code.gs terbaru</b>, jalankan <b>setup</b>, lalu <b>Terapkan → Kelola deployment → Versi baru</b>. Setelah itu ketuk Sinkron.</div>` : '')}
+
       <div class="section-title"><h2>Keamanan</h2></div>
       <div class="set-group">
         <button class="set-item" id="sPin"><div class="ic">🔒</div><div class="tx-main"><strong>Kunci PIN</strong><span>Minta PIN setiap aplikasi dibuka</span></div><span class="switch ${pinOn ? 'on' : ''}"></span></button>
@@ -974,7 +1359,7 @@
       ${state.queue.length ? `<div class="section-title"><h2>Antrean offline</h2></div>
       <div class="set-group"><button class="set-item" id="sFlush"><div class="ic">⏳</div><div class="tx-main"><strong>${state.queue.length} transaksi belum terkirim</strong><span>Ketuk untuk kirim sekarang</span></div><span class="chev">›</span></button></div>` : ''}
 
-      <p class="foot-note">Catatku v1.0 · Data tersimpan di Google Sheets milikmu</p>
+      <p class="foot-note">Catatku v1.1 · Data tersimpan di Google Sheets milikmu</p>
     `;
     $('#sPing', v).addEventListener('click', async (e) => {
       const b = e.currentTarget; b.disabled = true; b.textContent = 'Mengecek…';
@@ -1013,11 +1398,16 @@
         $('#ccOut', sh).innerHTML = list('pengeluaran'); $('#ccIn', sh).innerHTML = list('pemasukan');
       });
     });
+    bindCommon(v);
   }
 
   function bindCommon(v) {
     $$('[data-go]', v).forEach((b) => b.addEventListener('click', () => go(b.dataset.go)));
     $$('[data-add]', v).forEach((b) => b.addEventListener('click', () => openTxForm()));
+    $$('[data-wallets]', v).forEach((b) => b.addEventListener('click', openWalletManager));
+    $$('[data-budget]', v).forEach((b) => b.addEventListener('click', openBudgetEditor));
+    $$('[data-wallet]', v).forEach((b) => b.addEventListener('click', () => openWalletDetail(b.dataset.wallet)));
+    $$('[data-wallet-add]', v).forEach((b) => b.addEventListener('click', () => openWalletForm(null)));
   }
 
   function go(route) {
@@ -1101,9 +1491,11 @@
         <ol class="steps-mini"><li>URL didapat setelah Deploy → Web app di Apps Script.</li><li>Kunci muncul di Log setelah menjalankan fungsi <b>setup</b>.</li></ol>
       </div>
       <div id="suResult"></div>`;
+    ['#suUrl', '#suKey'].forEach((id) => $(id).addEventListener('input', () => { $(id).classList.remove('invalid'); $('#suErr').textContent = ''; }));
     $('#suGo').addEventListener('click', async () => {
       const url = $('#suUrl').value.trim(), key = $('#suKey').value.trim();
-      const err = $('#suErr'); err.textContent = '';
+      const err = $('#suErr'); err.textContent = ''; err.style.color = '';
+      $('#suUrl').classList.remove('invalid'); $('#suKey').classList.remove('invalid');
       if (!/^https:\/\/script\.google(usercontent)?\.com\/.+\/exec/.test(url)) { err.textContent = 'URL harus diawali https://script.google.com/… dan diakhiri /exec'; $('#suUrl').classList.add('invalid'); return; }
       if (key.length < 16) { err.textContent = 'Kunci rahasia terlalu pendek. Salin lengkap dari log.'; $('#suKey').classList.add('invalid'); return; }
       const b = $('#suGo'); b.disabled = true; b.innerHTML = '<span class="spinner"></span> Menghubungkan…';

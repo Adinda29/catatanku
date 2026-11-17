@@ -378,3 +378,80 @@ svg.chart text { font-family: inherit; fill: var(--faint); font-size: 10px; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+/* =========================================================
+   v1.1 — Dompet, Transfer, Anggaran
+   ========================================================= */
+.segmented.three { grid-template-columns: repeat(3, 1fr); }
+.segmented.three .thumb { width: calc((100% - 8px) / 3); }
+.segmented.three[data-v="pemasukan"] .thumb { transform: translateX(100%); }
+.segmented.three[data-v="transfer"] .thumb { transform: translateX(200%); }
+.segmented[data-v="transfer"] button[data-v="transfer"] { color: var(--indigo); }
+.segmented[aria-disabled="true"] button { pointer-events: none; }
+.segmented[aria-disabled="true"] button:not([data-v]) { opacity: .5; }
+
+.h-sub { font-weight: 600; font-size: 13px; color: var(--muted); }
+
+.wallet-strip { display: flex; gap: 10px; overflow-x: auto; padding: 2px 2px 8px; margin: 0 -16px; padding-left: 16px; padding-right: 16px; scroll-snap-type: x proximity; scroll-padding: 0 16px; scrollbar-width: none; }
+.wallet-strip::-webkit-scrollbar { display: none; }
+.wallet-card {
+  flex: none; width: 148px; scroll-snap-align: start; text-align: left;
+  padding: 14px; border-radius: 18px; background: var(--surface); border: 1px solid rgba(236, 238, 245, .9);
+  box-shadow: var(--shadow); display: flex; flex-direction: column; gap: 2px; transition: transform .15s var(--ease);
+}
+.wallet-card:active { transform: scale(.97); }
+.wallet-card .w-ic { width: 34px; height: 34px; border-radius: 11px; display: grid; place-items: center; font-size: 17px; background: var(--grad-soft); margin-bottom: 8px; }
+.wallet-card .w-name { font-size: 12.5px; color: var(--muted); font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wallet-card strong { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wallet-card.neg strong { color: var(--out); }
+.wallet-card.add { width: 112px; background: transparent; border: 1.5px dashed #cfd2e0; box-shadow: none; justify-content: center; align-items: center; text-align: center; }
+.wallet-card.add .w-ic { background: #f1f2f8; color: var(--muted); margin-bottom: 6px; }
+
+.wallet-hero { border-radius: 22px; padding: 18px; color: #fff; background: var(--grad); box-shadow: var(--shadow-lg); }
+.wallet-hero.neg { background: linear-gradient(135deg, #e0475b, #b8336a); }
+.wallet-hero p { margin: 0; font-size: 13px; opacity: .85; }
+.wallet-hero .wh-amt { font-size: 28px; font-weight: 800; letter-spacing: -.03em; margin: 2px 0 10px; }
+.wallet-hero-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12.5px; opacity: .9; }
+
+.wallet-chips .chip { padding: 9px 13px; }
+.wallet-chips .chip.active { background: #eef0ff; color: var(--indigo); border-color: var(--indigo); }
+
+.neg-toggle { width: 34px; height: 34px; border-radius: 10px; background: #f1f2f8; color: var(--muted); font-size: 20px; font-weight: 800; flex: none; align-self: center; }
+.neg-toggle.on { background: var(--out-bg); color: var(--out); }
+
+.tx-ic.tr { background: #eef0ff; color: var(--indigo); font-weight: 800; }
+.tx-amt.tr { color: var(--indigo); }
+.transfer-flow { display: flex; align-items: center; justify-content: center; gap: 18px; margin: 4px 0 6px; text-align: center; }
+.transfer-flow > div { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 14px; }
+.transfer-flow .arrow { font-size: 24px; color: var(--indigo); font-weight: 800; }
+
+/* Anggaran */
+.budget-card { display: grid; gap: 14px; }
+.budget-sum { display: flex; justify-content: space-between; font-size: 13.5px; color: var(--muted); }
+.budget-sum b { color: var(--text); }
+.budget-row .cat-bar-fill { background: linear-gradient(90deg, #4f46e5, #0fb5a6); }
+.budget-row.warn .cat-bar-fill { background: linear-gradient(90deg, #f59e0b, #f97316); }
+.budget-row.over .cat-bar-fill { background: linear-gradient(90deg, #f97316, #e0475b); }
+.budget-row.warn .cat-bar-top b { color: #c2610c; }
+.budget-row.over .cat-bar-top b { color: var(--out); }
+.budget-sub { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--muted); margin-top: 5px; }
+.budget-row.over .budget-sub span:last-child { color: var(--out); font-weight: 600; }
+
+.budget-hint { margin-top: 10px; padding: 10px 12px; border-radius: 12px; font-size: 13px; background: #f1f6ff; color: #3b4a7a; }
+.budget-hint.warn { background: #fff4de; color: #8a5300; }
+.budget-hint.over { background: var(--out-bg); color: var(--out); }
+
+.cta-card { width: 100%; display: flex; align-items: center; gap: 12px; text-align: left; }
+.cta-card .ic { width: 40px; height: 40px; border-radius: 13px; display: grid; place-items: center; font-size: 19px; background: var(--grad-soft); flex: none; }
+.cta-card .tx-main span { white-space: normal; }
+.cta-card .chev { color: var(--faint); font-size: 20px; }
+
+.budget-edit { display: grid; gap: 8px; margin-top: 8px; }
+.budget-edit-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-radius: 14px; background: #f8f9fc; }
+.be-name { flex: 1; min-width: 0; font-size: 14px; font-weight: 600; display: flex; flex-direction: column; }
+.be-name small { font-weight: 500; color: var(--muted); font-size: 11.5px; margin-top: 2px; }
+.be-input { display: flex; align-items: center; gap: 4px; width: 140px; height: 44px; padding: 0 10px; border-radius: 12px; background: #fff; border: 1.5px solid var(--line); }
+.be-input:focus-within { border-color: var(--indigo); box-shadow: 0 0 0 4px rgba(79, 70, 229, .12); }
+.be-input span { color: var(--faint); font-size: 13px; font-weight: 600; }
+.be-input input { width: 100%; border: 0; outline: 0; background: transparent; font-size: 15px; font-weight: 700; text-align: right; }
+.budget-total { text-align: right; color: var(--muted); font-size: 13px; margin: 10px 2px 0; }
